@@ -49,6 +49,37 @@ The installed app contains a single wb-switch tray. The built-in component
 does not create another tray or login item. The packaged files are versioned
 with the host app; the integration does not download executable code at runtime.
 
+## Process cleanup around install / update
+
+The monitor runtime (`wb-agent-runtime`; `agent-studio-runtime` on 0.1.65 and
+older) is started on demand and keeps running for 20 s after the last client
+leaves. On Windows that locks the executable inside the install directory, so
+NSIS fails to overwrite (`File`) or delete it — the user sees a failed update or
+install. Two places cover it:
+
+- `src-tauri/src/runtime_process.rs` terminates these processes before an update
+  is installed (via the updater's `on_before_exit`: the Windows install path ends
+  with `std::process::exit`, so `RunEvent::Exit` never fires), on a normal quit
+  and before a relaunch, then polls until the file handles are released. Only
+  processes from the install directory (and `src-tauri/binaries` in dev) are
+  matched; hook copies under `~/.agent-studio/bin` and other installations are
+  left alone.
+- `src-tauri/installer-hooks.nsh` (`bundle > windows > nsis > installerHooks`)
+  kills the main app first and the runtime second — the other order loses the
+  race against the host, which respawns the runtime every second — and removes
+  the stale `agent-studio-runtime.exe` left by older versions.
+- Replacing the package by hand (dragging a dmg, swapping an AppImage,
+  `dpkg -i`) has no installer hook to piggyback on, so startup clears leftovers
+  as well: `runtime_process::stale()` enumerates before the `tauri::Builder` is
+  built and `terminate_stale()` kills from the app `setup`. The split exists
+  because only plugin `setup` decides whether this process is a second instance
+  — a second launch must not kill the live instance's runtime — and the PIDs are
+  re-checked against their image path before killing, so PID reuse is harmless.
+
+`installerHooks` is resolved relative to the **current working directory** by
+tauri-bundler, and `tauri build` switches that to `src-tauri` before bundling —
+so the path is plain `installer-hooks.nsh` next to `tauri.conf.json`.
+
 ## Public demo overlay
 
 The read-only demo page (`npm run build:demo`) additionally embeds the

@@ -382,6 +382,9 @@ pub async fn restart<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         update,
     } = package;
     eprintln!("[更新] 开始安装 v{version}");
+    // 安装会整体替换应用目录：先结束采集服务。Windows 上它锁住 wb-agent-runtime.exe
+    // 会让安装器写文件失败；macOS / Linux 上旧进程活着，新版本起来后会连到旧运行时。
+    let _ = tauri::async_runtime::spawn_blocking(crate::runtime_process::terminate).await;
     // 安装会解压整包并替换应用（macOS 未授权时经 AppleScript 在主线程弹授权框），
     // 放 blocking 线程，避免占住 async worker。
     let installed = tauri::async_runtime::spawn_blocking(move || update.install(bytes)).await;
@@ -439,6 +442,11 @@ async fn download_package<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Option<DownloadedPackage>, String> {
     let builder = app.updater_builder();
+    // Windows 的 `install` 拉起安装器后直接 `std::process::exit`，走不到 `RunEvent::Exit`。
+    // 采集服务若还在跑，它会锁住安装目录里的 wb-agent-runtime.exe，安装器复制文件失败。
+    let builder = builder.on_before_exit(|| {
+        crate::runtime_process::terminate();
+    });
     let builder = match configured_proxy() {
         Some(proxy) => builder.proxy(
             tauri::Url::parse(&proxy).map_err(|error| format!("更新代理地址无效：{error}"))?,

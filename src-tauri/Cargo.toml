@@ -53,4 +53,11 @@ libc = "0.2"
 # 托盘图标跟随「Windows 模式」：读 SystemUsesLightTheme，并监听该键变化。
 # 版本与依赖图里已有的那份一致（ring → rustls 链路），不引入新的下载。
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Registry"] }
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    # 安装 / 退出前清理采集服务进程（`runtime_process.rs`）：遍历进程快照、
+    # 取映像路径、结束进程。
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }
