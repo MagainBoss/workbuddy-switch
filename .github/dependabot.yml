@@ -1,0 +1,13 @@
+version: 2
+
+# 只托管 Actions 自身版本：三个 workflow 里的 checkout / setup-node / cache 等
+# 长期散落升级，出错时才发现版本已落后多代。Rust 与 npm 依赖仍由人工按需升级。
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]

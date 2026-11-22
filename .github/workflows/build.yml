@@ -19,6 +19,13 @@ on:
 permissions:
   contents: write
 
+# 同一 tag 被重复推送 / 手动重跑时不要并发写同一个 Release：
+# 两个 run 同时上传同名资产，会互相覆盖或报 422。
+# 不取消进行中的构建——发版任务跑到一半被打断只会留下半套资产。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   select-matrix:
     name: Select platforms
@@ -112,6 +119,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -121,7 +129,10 @@ jobs:
           # （自有代码的告警由 test.yml 的 lint job 把关）。
           rustflags: ""
 
-      # cargo 缓存：依赖 + 编译产物，增量编译大幅提速（Cargo.lock 不变时命中）
+      # cargo 缓存：依赖 + 编译产物，增量编译大幅提速（Cargo.lock 不变时命中）。
+      # key 必须带 target：mac-arm64 与 mac-x64 都跑在 macos-latest 上，共用 key 时
+      # 两个 job 会抢着保存，先完成的赢，另一个架构的产物被丢弃——下次发版就只剩
+      # 一个架构的缓存可用。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -129,8 +140,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -157,9 +168,11 @@ jobs:
           echo "$DMGBUILD_VENV/bin" >> "$GITHUB_PATH"
 
       # 前端构建产物（CLI 二进制 rust-embed 嵌入 + Tauri App 使用）
+      # 用 npm ci 而不是 npm install：按 package-lock.json 装，四个平台同版本，
+      # 且配合 setup-node 的 cache: npm。
       - name: Build frontend
         run: |
-          npm install
+          npm ci
           npm run build
 
       # CLI 二进制
@@ -312,6 +325,9 @@ jobs:
           name: ${{ matrix.name }}
           path: dist-bin/
           if-no-files-found: error
+          # Release 资产已由 softprops/action-gh-release 固化，这里只是中转，
+          # 不需要保留默认的 90 天。
+          retention-days: 7
 
   # 所有平台包发布成功后，发布主包（optionalDependencies 引用平台包）
   publish-main:
@@ -323,7 +339,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Publish main package
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

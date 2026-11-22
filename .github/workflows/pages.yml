@@ -3,6 +3,20 @@ name: Deploy public demo to GitHub Pages
 on:
   push:
     branches: [main]
+    # 只有真正影响 demo 产物的提交才重新部署。此前每次 main 更新都重建
+    # （16 次运行里多数只动了 Rust / CI / 文档），每次约 90s。
+    paths:
+      - "src/**"                              # vite alias @ -> ./src、tsc include
+      - "index.html"                          # vite 入口，指向 src/main.tsx
+      - "public/**"                           # icon / svg 静态资源（BASE_URL 引用）
+      - "vite.config.ts"                      # alias、base（VITE_PAGES_DEMO）
+      - "tsconfig.json"                       # tsc 输入
+      - "tsconfig.node.json"                  # tsc references（include vite.config.ts）
+      - "package.json"                        # build:demo 脚本
+      - "package-lock.json"                   # npm ci 的锁文件
+      - "scripts/prepare-companion-demo.mjs"  # demo 子构建与产物搬运
+      - "vendor/agent-companion/**"           # 内嵌会话栏子项目，参与源指纹
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -25,10 +39,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 与 build.yml / test.yml 统一到 Node 22（此前这里是 20）。
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies

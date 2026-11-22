@@ -20,8 +20,7 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
 
-    /* Path aliases */
-    "baseUrl": ".",
+    /* Path aliases：paths 自 TS 4.1 起可脱离 baseUrl，按本文件所在目录解析 */
     "paths": {
       "@/*": ["./src/*"]
     }

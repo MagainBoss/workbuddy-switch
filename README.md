@@ -10,6 +10,8 @@ WorkBuddy、CodeBuddy IDE、CodeBuddy CLI 与 VS Code CodeBuddy 插件账号切�
 
 **在线演示**：[打开 GitHub Pages 演示](https://magainboss.github.io/workbuddy-switch/)（只读演示；账号、积分与请求记录均为虚构数据，所有业务操作均已禁用，另含只读的会话悬浮栏演示）
 
+> **关于本项目**：本仓库派生自上游 [changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch)，最初的设计与绝大部分核心能力都来自上游作者，详见 [致谢](#致谢)。本仓库只通过自己的 GitHub Releases 分发桌面安装包，**不发布也不更新 npm 包**；npm 上的 `workbuddy-switch` 由上游维护，版本通常落后于这里的 Releases。
+
 ## 快速开始
 
 前往 [GitHub Releases](https://github.com/MagainBoss/workbuddy-switch/releases/latest) 下载对应平台的安装包：
@@ -29,7 +31,7 @@ xattr -rd com.apple.quarantine "/Applications/workbuddy-switch.app"
 
 应用能启动但切换账号时提示无权限，请参阅下方 [macOS 权限说明](#macos-权限说明)。
 
-另有 npm / webui 版本可在浏览器中使用，见文末 [npm / webui 版本](#npm--webui-版本)。
+另有上游维护的 npm / webui 版本可在浏览器中使用（本仓库不更新 npm 包），见文末 [npm / webui 版本](#npm--webui-版本)。
 
 ## 功能
 
@@ -137,6 +139,8 @@ Token 统计页按来源展示 Token 总览与趋势、构成占比、活跃热�
 
 ## npm / webui 版本
 
+> **本仓库不发布、不更新 npm 包。** npm 上的 `workbuddy-switch` 由上游 [changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch) 维护，可能明显落后于本仓库的桌面版；需要最新功能与修复请从本仓库 [GitHub Releases](https://github.com/MagainBoss/workbuddy-switch/releases/latest) 下载桌面安装包。
+
 ```bash
 npm i -g workbuddy-switch
 workbuddy-switch              # 启动本地服务 + 自动打开浏览器
@@ -156,6 +160,8 @@ WB_SWITCH_HOST=0.0.0.0 WB_SWITCH_PORT=8080 workbuddy-switch   # 环境变量写�
 注意：接口无鉴权，改成非回环地址（如 `0.0.0.0`）后账号 Token 等敏感数据将暴露给局域网 / 外网，请配合防火墙或 SSH 端口转发使用。
 
 ## 致谢
+
+感谢上游仓库 [changexbc/workbuddy-switch](https://github.com/changexbc/workbuddy-switch) 及其作者：本项目基于该项目继续开发，账号切换、会话复制、积分与 Token 统计等核心能力都源自上游的工作，MIT 许可下的原始著作权归上游作者所有。
 
 感谢 [Linux.do](https://linux.do) 社区。
 
