@@ -44,7 +44,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/wb-agent-runtime"]
+    "externalBin": ["binaries/wb-agent-runtime"],
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer-hooks.nsh"
+      }
+    }
   },
   "plugins": {
     "updater": {

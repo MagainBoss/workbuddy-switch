@@ -3,7 +3,10 @@
 
 use tauri::AppHandle;
 
-fn runtime_path() -> std::path::PathBuf {
+/// 采集服务可执行文件的位置（打包后与主程序同目录，开发态是本仓库的 `binaries/`）。
+///
+/// 清理残留的采集服务进程时也要认这个目录（见 `runtime_process`）。
+pub(crate) fn runtime_path() -> std::path::PathBuf {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
     let bundled = std::env::current_exe().ok().and_then(|exe| {
         exe.parent()

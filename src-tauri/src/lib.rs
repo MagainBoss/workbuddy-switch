@@ -3,6 +3,7 @@ mod commands;
 mod companion;
 #[cfg(target_os = "macos")]
 mod instance_lock;
+mod runtime_process;
 #[cfg(desktop)]
 mod tray;
 mod update_service;
@@ -151,6 +152,11 @@ fn spawn_background_loops(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 构建应用前先记下遗留的采集服务进程：手动替换安装包（macOS 拖 dmg、Linux 换
+    // AppImage / `dpkg -i`）没有安装器钩子可插入，上一次运行残留的运行时会被新版本
+    // 连上。此处只枚举，结束动作放在 `setup`——单实例判定之后。
+    #[cfg(desktop)]
+    let stale_runtimes = runtime_process::stale();
     let mut builder = tauri::Builder::default();
 
     // 单实例互斥必须最先注册：`Builder::build()` 按注册顺序 initialize_plugins，
@@ -184,7 +190,7 @@ pub fn run() {
     }
 
     let app = builder
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(desktop)]
             {
                 // 插件已在 initialize_plugins 阶段决定 notify-or-exit；此处只兜底
@@ -193,6 +199,9 @@ pub fn run() {
                 // notify 之前拦下正常第二实例，丢掉「再点开 → 既有窗口弹出」。
                 #[cfg(target_os = "macos")]
                 instance_lock::acquire_or_exit(app.handle());
+                // 单实例身份已确定：结束构建前就存在的采集服务进程（第二实例走不到这里，
+                // 所以不会打掉正在运行实例的运行时）。
+                runtime_process::terminate_stale(&stale_runtimes);
                 tray::setup(app)?;
                 // 主窗口由配置创建为不可见；在事件循环呈现前决定本次启动是否静默。
                 // 仅系统自启（精确 `--hidden` 参数）进入静默托盘，普通启动立即显示主窗口。
@@ -320,6 +329,11 @@ pub fn run() {
             } = &event
             {
                 tray::show_main_window_on_reopen(_app_handle);
+            }
+            // 退出前结束采集服务：它默认要等最后一个客户端空闲 20 秒才退出，期间会锁住
+            // 安装目录里的 exe。用户退出后立刻手动安装时，安装器就会写文件失败。
+            if matches!(&event, tauri::RunEvent::Exit) {
+                runtime_process::terminate();
             }
             tray::on_run_event(event);
         }

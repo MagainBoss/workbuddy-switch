@@ -1296,6 +1296,9 @@ pub(crate) fn relaunch_app_inner<R: tauri::Runtime>(
     tauri_plugin_single_instance::destroy(_app);
     #[cfg(target_os = "macos")]
     crate::instance_lock::release(_app);
+    // 新进程会重新拉起采集服务；旧进程留着既占住安装目录里的 exe（更新后就是新包的
+    // 文件），也会让新版本连到旧运行时。
+    crate::runtime_process::terminate();
     match std::process::Command::new(executable).args(args).spawn() {
         Ok(_) => std::process::exit(0),
         Err(e) => {
