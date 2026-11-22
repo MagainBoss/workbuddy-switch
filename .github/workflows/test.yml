@@ -3,8 +3,13 @@ name: test
 # 测试必须独立于发布流程：build.yml 仅由 tag push / workflow_dispatch 触发，
 # 测试若挂在它下面，就只在发版时执行——2026-09 的 Windows「os error 5」回归
 # 正是这样漏到 0.1.43 的。本 workflow 在 push 与 PR 上即触发。
+#
+# 触发范围收窄到 main + PR：分支 push 与 PR 的 ref 不同（refs/heads/* 与
+# refs/pull/*/merge），concurrency 取消不掉彼此，同一提交会白跑两遍；
+# tag push 也不该再跑（同一 commit 已在 main 上跑过，run 44 与 run 43 即重复）。
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -32,8 +37,9 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # 与 build.yml 分开的 key 前缀（那边是 release profile 产物），
-      # restore-keys 回落到它的缓存，以复用依赖编译产物。
+      # 与 build.yml 分开的 key 前缀（那边是 release profile 产物）。
+      # restore-keys 只在 debug profile 内部回落：不能回落到 `-cargo-`，
+      # 那是 build.yml 的 release 产物，解压要几分钟且对 debug 编译无用。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -44,7 +50,7 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-lint-
 
       # 只跑 core：零 tauri 依赖，不需要 webkit / npm / 前端 dist。
       # 不传 --target，用 runner 原生 target——build.yml 的 mac-x64 是 arm runner 上
@@ -52,21 +58,18 @@ jobs:
       - name: Run tests
         run: cargo test -p wb-switch-core
 
-      # linux 专属 cfg 分支只在 ubuntu 上展开（macOS 侧由 lint job 覆盖）。
-      # rust-embed 要求 #[folder] 目录存在，先建 dist 占位（前端产物由 build.yml 产出）。
-      - name: Clippy (linux cfg)
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p dist
-          cargo clippy -p wb-switch-core -p wb-switch-server --all-targets --no-deps -- -D warnings
+      # Linux cfg 的 clippy 统一交给下方 lint job：它同样跑在 ubuntu 上，
+      # 且带失败输出兜底，这里不重复跑一遍。
 
-  # 前端类型、格式与 lint 门禁。跑在 macOS 上：clippy 按宿主平台展开 cfg 分支，
-  # 与开发者本机一致，本地全绿即 CI 全绿。linux 专属分支由 rust-tests 的 ubuntu
-  # job 覆盖，windows 分支暂未纳入。
+  # 门禁：前端类型/构建 + Rust 格式 + clippy（Linux cfg）+ server 测试。
+  # 跑在 ubuntu 上：这些检查与宿主平台无关，而 macOS runner 计费是 10 倍
+  # —— 单次 5m44s 的 lint 占了整轮 68 计费分钟里的 57。
+  # 平台 cfg 的分工：Linux 由本 job 覆盖，Windows 由 desktop-tests 覆盖；
+  # macOS 专属分支（instance_lock / tray 图标）暂无 CI 覆盖。
   # clippy 必须带 --no-deps：vendor/agent-companion 是 path 依赖快照，其告警不归本仓库。
   lint:
     name: lint (tsc + fmt + clippy + server tests)
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -77,7 +80,8 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # 与 rust-tests 相同的 key 前缀，直接复用依赖编译产物。
+      # 独立前缀：与 rust-tests 共用同一个 key 时，两个 job 同时写同一份缓存，
+      # 后完成的那个会被丢弃。
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -85,10 +89,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-lint-
             ${{ runner.os }}-cargo-test-
-            ${{ runner.os }}-cargo-
+
+      # tauri-build 在 Linux 上要链接 webkit2gtk 等系统库（同 build.yml）。
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Install frontend dependencies
         run: npm ci
@@ -99,10 +109,17 @@ jobs:
 
       # tauri-build 还要求 externalBin 存在。这里只放占位文件让编译检查通过；
       # 真实 runtime 由 build.yml（发版）与 scripts/prepare-agent-companion.mjs 产出。
+      # Windows 目标的 sidecar 名带 .exe 后缀，按 host triple 判断，两个 job 共用。
       - name: Stub companion runtime binary
+        shell: bash
         run: |
           mkdir -p src-tauri/binaries
-          touch "src-tauri/binaries/wb-agent-runtime-$(rustc -vV | sed -n "s/^host: //p")"
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          case "$triple" in
+            *windows*) suffix=".exe" ;;
+            *) suffix="" ;;
+          esac
+          touch "src-tauri/binaries/wb-agent-runtime-${triple}${suffix}"
 
       - name: Check formatting
         run: cargo fmt --check -p wb-switch-core -p wb-switch-server -p wb-switch-rust
@@ -113,7 +130,7 @@ jobs:
       - name: Clippy
         run: |
           set +e
-          cargo clippy -p wb-switch-core -p wb-switch-server -p wb-switch-rust \
+          cargo clippy -p wb-switch-core -p wb-switch-server \
             --all-targets --no-deps -- -D warnings 2>&1 | tee clippy.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
@@ -131,8 +148,71 @@ jobs:
       - name: Server tests
         run: cargo test -p wb-switch-server
 
-      # src-tauri 的 40 个测试此前从不运行（rust-tests 只覆盖 core）。
-      # 前置 dist 与 stub companion binary 已由上方步骤就位。
+  # 桌面 crate 的 Windows 专属测试（tray 主题、runtime 进程占用）此前从未在任何
+  # CI 上跑过。放在 windows-latest 而不是 macOS：Windows 是主要目标平台，
+  # 计费为 1 倍（macOS 为 10 倍）。
+  desktop-tests:
+    name: desktop tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-desktop-
+            ${{ runner.os }}-cargo-test-
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # tauri-build 要求 frontendDist 存在，先产出真实 dist 供编译嵌入。
+      - name: Build frontend
+        run: npm run build
+
+      # Windows 的 sidecar 名带 .exe（见 scripts/prepare-agent-companion.mjs）。
+      - name: Stub companion runtime binary
+        shell: bash
+        run: |
+          mkdir -p src-tauri/binaries
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          case "$triple" in
+            *windows*) suffix=".exe" ;;
+            *) suffix="" ;;
+          esac
+          touch "src-tauri/binaries/wb-agent-runtime-${triple}${suffix}"
+
+      # 与 lint 的 Clippy 同样的 summary 兜底。
+      - name: Clippy (windows cfg)
+        shell: bash
+        run: |
+          set +e
+          cargo clippy -p wb-switch-rust --all-targets --no-deps -- -D warnings 2>&1 | tee clippy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            {
+              echo '### clippy 输出'
+              echo '```'
+              tail -n 300 clippy.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$(tail -n 40 clippy.log | tr '\n' ' ' | tr -d '\r' | cut -c1-60000)"
+          fi
+          exit "$status"
+
       - name: Desktop app tests
         run: cargo test -p wb-switch-rust
 
