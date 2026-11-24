@@ -5,9 +5,12 @@
 // 作为 Authorization 头使用。当前选中账号由 wb-switch 写入
 // ~/.codebuddy-rotate/state.json（activeAccountId / active 索引）。
 //
-// 用 Node 实现：CodeBuddy CLI 本身就是 Node 应用（npm 安装，shebang 同样是
-// #!/usr/bin/env node），helper 由 CLI 拉起时 node 必然可用——用户不需要安装
-// Python 等任何额外环境。
+// 注意首行的 shebang：**发布版**写的是 `#!/usr/bin/env node`，但 wb-switch 安装
+// helper 时会把它替换成 Node.js 的绝对路径（如 `#!/home/me/.nvm/.../bin/node`）。
+// 原因：CodeBuddy CLI 用**自己的子 shell** 执行 helper，那个 shell 的 PATH 不一定
+// 包含 nvm；依赖 PATH 的旧版本 helper 会以退出码 127（env: 'node': No such file
+// or directory）失败，CLI 随即静默回落到自身登录态，账号切换看起来成功却不生效。
+// 改动本文件时请保留首行形态，安装逻辑依赖它做替换。
 "use strict";
 
 const fs = require("fs");
