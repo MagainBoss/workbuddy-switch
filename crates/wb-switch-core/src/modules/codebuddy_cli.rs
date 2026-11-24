@@ -3,6 +3,10 @@
 //! Windows 直接维护 `settings.json.env.CODEBUDDY_AUTH_TOKEN`，绕过 CLI
 //! 执行 `apiKeyHelper` 时的路径兼容问题；macOS/Linux 继续使用 helper。
 //! 两种模式都复用 wb-switch 的 WorkBuddy 账号库，但保持独立的当前账号。
+//!
+//! macOS/Linux 的 helper **必须**把 shebang 写成 Node.js 绝对路径：CLI 用自己的
+//! 子 shell 执行 helper，PATH 可能不含 nvm（实测退出码 127），失败后 CLI 会静默
+//! 回落到自身登录态，表现为「切换成功但账号没变」。
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -57,6 +61,12 @@ const CLI_ENV_CACHE_KEY: &str = "CodeBuddy-Environment-Cache";
 const CLI_ENDPOINT_CACHE_KEY: &str = "CodeBuddy-Endpoint-Cache";
 const CLI_PRODUCT_CACHE_KEY: &str = "CodeBuddy-Product-Cache";
 const STANDARD_HELPER: &str = include_str!("../../../../scripts/codebuddy-cli-helper.cjs");
+/// 发布版 helper 的 shebang 行；安装时会替换成 Node.js 绝对路径。
+///
+/// Windows 不使用 helper（走 `settings.json.env.CODEBUDDY_AUTH_TOKEN`），
+/// 非测试构建里这个常量只在 macOS/Linux 有意义。
+#[cfg(any(not(target_os = "windows"), test))]
+const HELPER_SHEBANG_ENV_NODE: &str = "#!/usr/bin/env node";
 
 fn rotate_dir() -> PathBuf {
     home_dir().join(ROTATE_DIR)
@@ -687,11 +697,197 @@ fn helper_migration_required() -> bool {
         return false;
     };
     is_legacy_helper_path(&path, &rotate_dir(), cfg!(windows))
+        || (path.is_file() && !helper_node_shebang_is_portable(&path))
 }
 
 fn is_legacy_helper_path(path: &Path, directory: &Path, windows: bool) -> bool {
     same_path(path, &directory.join(LEGACY_WINDOWS_HELPER_FILE), windows)
         || same_path(path, &directory.join(LEGACY_HELPER_FILE), windows)
+}
+
+/// 发布版 helper 的正体（去掉 shebang 行）。
+///
+/// 源码文件在 Windows 上可能被检出成 CRLF，两种换行都要能剥掉，否则替换会静默失效、
+/// 又退回依赖 PATH 的 `#!/usr/bin/env node`。
+#[cfg(any(not(target_os = "windows"), test))]
+fn helper_body() -> &'static str {
+    STANDARD_HELPER
+        .strip_prefix(HELPER_SHEBANG_ENV_NODE)
+        .map(|rest| rest.trim_start_matches(&['\r', '\n'][..]))
+        .unwrap_or(STANDARD_HELPER)
+}
+
+/// 把发布版 helper 首行的 `#!/usr/bin/env node` 换成 Node.js 的绝对路径。
+///
+/// CodeBuddy CLI 执行 helper 用的是它自己的子 shell（`DelegatingShellService →
+/// LocalShellService`），PATH 与用户登录 shell 无关：Debian + nvm 上实测 helper 以
+/// `exitCode=127 / env: 'node': No such file or directory` 失败，CLI 随即回落到它
+/// 自己的登录态，表现就是「切换成功但账号没变」。写死解释器路径可以彻底摆脱 PATH。
+#[cfg(any(not(target_os = "windows"), test))]
+fn helper_source_with_node(node: &Path) -> Result<String, String> {
+    let node = node.to_string_lossy();
+    if node.chars().any(char::is_whitespace) {
+        return Err(node_path_unsupported("包含空白字符"));
+    }
+    // 内核解析 shebang 有长度上限（Linux 127/256 字节，macOS 512），超长会被截断成
+    // 错误的解释器路径并报 ENOENT。这里按最保守的上限拒绝，错误信息说明原因。
+    if node.len() > 125 {
+        return Err(node_path_unsupported("过长"));
+    }
+    Ok(format!("#!{node}\n{}", helper_body()))
+}
+
+#[cfg(any(not(target_os = "windows"), test))]
+fn node_path_unsupported(reason: &str) -> String {
+    helper_validation_error(
+        "安装阶段",
+        &format!(
+            "Node.js 安装路径{reason}，CodeBuddy CLI 无法通过 shebang 直接执行 helper；请把 Node.js 安装到不含空白且较短的路径"
+        ),
+    )
+}
+
+/// 以 `node -p process.execPath` 拿真实绝对路径，消掉 nvm / alternatives 的间接层；
+/// 跑不通时退回候选本身（仍是绝对路径才接受，shebang 里必须是绝对路径）。
+#[cfg(not(target_os = "windows"))]
+fn canonical_node_path(candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_absolute() || !candidate.is_file() {
+        return None;
+    }
+    if let Ok(output) = Command::new(candidate)
+        .args(["-p", "process.execPath"])
+        .output()
+    {
+        let reported = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        if output.status.success() && reported.is_absolute() && reported.is_file() {
+            return Some(reported);
+        }
+    }
+    Some(candidate.to_path_buf())
+}
+
+/// nvm 安装的 node 不会出现在 GUI / 服务进程的 PATH 里，这里按版本目录兜底。
+#[cfg(not(target_os = "windows"))]
+fn nvm_node_candidates() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(dir) = std::env::var_os("NVM_DIR") {
+        if !dir.is_empty() {
+            roots.push(PathBuf::from(dir));
+        }
+    }
+    roots.push(home_dir().join(".nvm"));
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        let versions = root.join("versions").join("node");
+        let Ok(entries) = std::fs::read_dir(&versions) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path().join("bin").join("node"))
+            .filter(|candidate| candidate.is_file())
+            .collect();
+        // 版本目录字典序对 v9 / v22 不可靠，但这里只是兜底：同目录内优先最新安装的那个。
+        dirs.sort();
+        dirs.reverse();
+        candidates.extend(dirs);
+    }
+    candidates
+}
+
+/// Node.js 可执行文件的查找顺序：当前 PATH → 登录 shell → 平台常见位置 → nvm。
+#[cfg(not(target_os = "windows"))]
+fn node_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(paths) = std::env::var_os("PATH") {
+        candidates.extend(std::env::split_paths(&paths).map(|dir| dir.join("node")));
+    }
+    // 登录 shell 才能看到 nvm 注入的 PATH；helper 由 Rust 直接执行，不解析其输出。
+    for shell in [
+        std::env::var_os("SHELL"),
+        Some("/bin/zsh".into()),
+        Some("/bin/bash".into()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let shell = PathBuf::from(shell);
+        let Ok(output) = Command::new(&shell)
+            .args(["-lic", "command -v node"])
+            .output()
+        else {
+            continue;
+        };
+        if let Some(path) = node_path_from_shell_output(&output.stdout) {
+            candidates.push(path);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        candidates.push(PathBuf::from("/opt/homebrew/bin/node"));
+        candidates.push(PathBuf::from("/usr/local/bin/node"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        candidates.push(PathBuf::from("/usr/local/bin/node"));
+        candidates.push(PathBuf::from("/usr/bin/node"));
+        candidates.push(PathBuf::from("/snap/bin/node"));
+        candidates.push(home_dir().join(".local").join("bin").join("node"));
+    }
+    candidates.extend(nvm_node_candidates());
+    candidates
+}
+
+#[cfg(not(target_os = "windows"))]
+fn resolve_node_executable() -> Option<PathBuf> {
+    node_candidates()
+        .iter()
+        .find_map(|candidate| canonical_node_path(candidate))
+}
+
+/// 安装用的 helper 源码：shebang 写死为 Node.js 绝对路径；找不到 node 直接失败，
+/// 不做「先写上等运行时报错」——那正是本次故障的形态。
+///
+/// Windows 走 `install_env_auth()`，这里只为让 `install_helper` 两侧都能编译。
+#[cfg(target_os = "windows")]
+fn installed_helper_source() -> Result<String, String> {
+    Ok(STANDARD_HELPER.to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn installed_helper_source() -> Result<String, String> {
+    let node = resolve_node_executable().ok_or_else(|| {
+        helper_validation_error(
+            "安装阶段",
+            "未找到可执行的 Node.js；CodeBuddy CLI 执行 helper 时不会读取登录 shell 的 PATH，请先安装 Node.js 或把 node 放到标准路径",
+        )
+    })?;
+    helper_source_with_node(&node)
+}
+
+/// helper 首行的 shebang 是否指向仍然存在的绝对 Node.js 路径。
+///
+/// 只认 `#!/path/to/node`：`#!/usr/bin/env node`、`#!/bin/sh`、相对路径、带参数、
+/// 目标已删除（nvm 卸载旧版本）都算「需要升级」，否则 CLI 执行时又会静默失败。
+fn helper_node_shebang_is_portable(path: &Path) -> bool {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Some(first) = source.lines().next() else {
+        return false;
+    };
+    let Some(interpreter) = first.strip_prefix("#!") else {
+        return false;
+    };
+    let interpreter = interpreter.trim();
+    if interpreter.is_empty() || interpreter.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let interpreter = Path::new(interpreter);
+    interpreter.is_absolute()
+        && interpreter.file_name().and_then(|name| name.to_str()) == Some("node")
+        && interpreter.is_file()
 }
 
 fn helper_is_current() -> bool {
@@ -701,6 +897,7 @@ fn helper_is_current() -> bool {
     path.is_file()
         && same_path(&path, &rotate_dir().join(HELPER_FILE), cfg!(windows))
         && helper_supports_account_ids()
+        && helper_node_shebang_is_portable(&path)
 }
 
 fn helper_supports_account_ids() -> bool {
@@ -866,7 +1063,7 @@ fn validate_helper_result(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn node_path_from_shell_output(stdout: &[u8]) -> Option<PathBuf> {
     String::from_utf8_lossy(stdout)
         .lines()
@@ -1319,11 +1516,13 @@ pub fn install_helper() -> Result<Value, String> {
         return Err("CodeBuddy settings.json 顶层不是对象".to_string());
     }
 
+    // Node.js 路径在建目录、写文件之前解析：找不到就直接失败，不留半成品配置。
+    let helper_source = installed_helper_source()?;
     std::fs::create_dir_all(rotate_dir()).map_err(|_| {
         helper_validation_error("安装阶段", "无法创建 helper 目录，请检查用户目录权限")
     })?;
-    // 各平台都直接配置这份 helper.cjs。
-    atomic_write(&logic_target, STANDARD_HELPER)
+    // 各平台都直接配置这份 helper.cjs（shebang 已写死 Node.js 绝对路径）。
+    atomic_write(&logic_target, &helper_source)
         .map_err(|_| helper_validation_error("安装阶段", "无法写入 helper.cjs，请检查文件权限"))?;
     #[cfg(unix)]
     {
@@ -1432,7 +1631,10 @@ pub fn switch_active_account(account_id: &str) -> Result<Value, String> {
         ensure_no_process_env_override()?;
     }
     if !cfg!(windows) && helper_migration_required() {
-        return Err("检测到旧版 CodeBuddy CLI helper；请先在账号页升级 CLI helper".to_string());
+        return Err(
+            "检测到旧版或依赖 PATH 中 node 的 CodeBuddy CLI helper；请先在账号页升级 CLI helper"
+                .to_string(),
+        );
     }
     if !cfg!(windows) && !helper_is_configured() {
         return Err(
@@ -2143,6 +2345,121 @@ mod tests {
         assert!(!String::from_utf8_lossy(&output.stderr).contains("SECRET_ONE"));
 
         fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // helper 的 shebang：不能再依赖 CLI 子 shell 的 PATH
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn helper_source_replaces_env_shebang_with_absolute_node() {
+        let source = helper_source_with_node(Path::new("/opt/node/bin/node")).unwrap();
+        let shebang = source.lines().next().unwrap_or_default();
+        assert_eq!(
+            shebang, "#!/opt/node/bin/node",
+            "首行必须是 Node.js 绝对路径"
+        );
+        assert!(
+            !shebang.contains("env node"),
+            "安装后的 helper 首行不得再依赖 PATH 中的 node"
+        );
+        assert!(
+            source.contains("activeAccountId"),
+            "替换 shebang 不能丢掉 helper 正体"
+        );
+    }
+
+    #[test]
+    fn helper_source_rejects_node_path_with_whitespace() {
+        let error = helper_source_with_node(Path::new("/opt/my node/bin/node")).unwrap_err();
+        assert!(error.contains("安装阶段"), "{error}");
+        assert!(error.contains("空白"), "{error}");
+    }
+
+    #[test]
+    fn portable_helper_shebang_requires_an_existing_absolute_node() {
+        let root = helper_test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let node = root.join("node");
+        fs::write(&node, "").unwrap();
+        let helper = root.join("helper.cjs");
+
+        fs::write(&helper, format!("#!{}\nconsole.log(1)\n", node.display())).unwrap();
+        assert!(helper_node_shebang_is_portable(&helper));
+
+        // 依赖 PATH 的旧写法 → 需要升级。
+        fs::write(&helper, "#!/usr/bin/env node\nconsole.log(1)\n").unwrap();
+        assert!(!helper_node_shebang_is_portable(&helper));
+
+        // shebang 指向的 node 已不存在（nvm 删了那个版本）→ 需要升级。
+        let missing = root.join("missing-node");
+        fs::write(&helper, format!("#!{}\n", missing.display())).unwrap();
+        assert!(!helper_node_shebang_is_portable(&helper));
+
+        // 带参数的解释器、相对路径、非 node 解释器、没有 shebang → 都不可移植。
+        for source in [
+            "#!/bin/sh -e\n",
+            "#!./node\n",
+            "#!/bin/sh\n",
+            "console.log(1)\n",
+        ] {
+            fs::write(&helper, source).unwrap();
+            assert!(
+                !helper_node_shebang_is_portable(&helper),
+                "不应把 {source:?} 当作可移植 shebang"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 回归：CLI 执行 helper 的子 shell 里没有 nvm 的 PATH（本次故障的现场）。
+    #[cfg(unix)]
+    #[test]
+    fn helper_runs_when_node_is_not_on_the_cli_path() {
+        let Some(node) = resolve_node_executable() else {
+            eprintln!("跳过：本机没有可用的 node");
+            return;
+        };
+        let root = helper_test_dir();
+        let rotate = root.join("rotate");
+        fs::create_dir_all(&rotate).unwrap();
+        let accounts = root.join("accounts.json");
+        fs::write(
+            &accounts,
+            serde_json::to_vec(&json!([{"id": "a1", "access_token": "SECRET_ONE"}])).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            rotate.join(STATE_FILE),
+            serde_json::to_vec(&json!({"activeAccountId": "a1"})).unwrap(),
+        )
+        .unwrap();
+
+        let helper = root.join(HELPER_FILE);
+        fs::write(&helper, helper_source_with_node(&node).unwrap()).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // PATH 只留系统目录：旧的 `#!/usr/bin/env node` helper 在这里必然 127。
+        let output = Command::new(&helper)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CODEBUDDY_ROTATE_DIR", &rotate)
+            .env("WB_SWITCH_ACCOUNTS_FILE", &accounts)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "helper 在缺少 node PATH 时失败：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "Bearer SECRET_ONE\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

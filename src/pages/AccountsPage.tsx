@@ -989,7 +989,7 @@ export default function AccountsPage() {
                         ? "检测到旧版 Windows helper 配置。接入后会改用 settings.json 的 env.CODEBUDDY_AUTH_TOKEN，不再执行 helper。"
                         : "Windows 使用 CodeBuddy settings.json 中的认证 Token。保活刷新只更新后续启动使用的 Token；切换账号会先关闭正在运行的 CodeBuddy CLI，重新打开 CLI 后即用新账号。"
                 : codebuddyCli.migrationRequired
-                  ? "检测到旧版 helper，请先升级；升级前不会将 CLI 切换显示为已验证。"
+                  ? "检测到旧版或依赖 PATH 中 node 的 helper，请先升级；升级前不会将 CLI 切换显示为已验证。"
                   : codebuddyCli.configured
                     ? "当前 helper 仍按旧索引读取账号；升级后将按账号 ID 独立切换，账号增删也不会错位。"
                     : "WorkBuddy 账号与积分功能可正常使用；如需从这里切换 CodeBuddy CLI 账号，点击下方按钮一键接入。"}
